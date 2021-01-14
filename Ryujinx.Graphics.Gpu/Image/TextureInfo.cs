@@ -1,271 +1,310 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
-using Ryujinx.Graphics.Texture;
+using Ryujinx.Graphics.Gpu.Memory;
+using System.Collections.Generic;
 
 namespace Ryujinx.Graphics.Gpu.Image
 {
     /// <summary>
-    /// Texture information.
+    /// Texture pool.
     /// </summary>
-    struct TextureInfo
+    class TexturePool : Pool<Texture>
     {
-        /// <summary>
-        /// Address of the texture in guest memory.
-        /// </summary>
-        public ulong Address { get; }
+        private int _sequenceNumber;
 
         /// <summary>
-        /// The width of the texture.
+        /// Intrusive linked list node used on the texture pool cache.
         /// </summary>
-        public int Width { get; }
+        public LinkedListNode<TexturePool> CacheNode { get; set; }
 
         /// <summary>
-        /// The height of the texture, or layers count for 1D array textures.
+        /// Constructs a new instance of the texture pool.
         /// </summary>
-        public int Height { get; }
+        /// <param name="context">GPU context that the texture pool belongs to</param>
+        /// <param name="address">Address of the texture pool in guest memory</param>
+        /// <param name="maximumId">Maximum texture ID of the texture pool (equal to maximum textures minus one)</param>
+        public TexturePool(GpuContext context, ulong address, int maximumId) : base(context, address, maximumId) { }
 
         /// <summary>
-        /// The depth of the texture (for 3D textures), or layers count for array textures.
+        /// Gets the texture with the given ID.
         /// </summary>
-        public int DepthOrLayers { get; }
-
-        /// <summary>
-        /// The number of mipmap levels of the texture.
-        /// </summary>
-        public int Levels { get; }
-
-        /// <summary>
-        /// The number of samples in the X direction for multisampled textures.
-        /// </summary>
-        public int SamplesInX { get; }
-
-        /// <summary>
-        /// The number of samples in the Y direction for multisampled textures.
-        /// </summary>
-        public int SamplesInY { get; }
-
-        /// <summary>
-        /// The number of bytes per line for linear textures.
-        /// </summary>
-        public int Stride { get; }
-
-        /// <summary>
-        /// Indicates whenever or not the texture is a linear texture.
-        /// </summary>
-        public bool IsLinear { get; }
-
-        /// <summary>
-        /// GOB blocks in the Y direction, for block linear textures.
-        /// </summary>
-        public int GobBlocksInY { get; }
-
-        /// <summary>
-        /// GOB blocks in the Z direction, for block linear textures.
-        /// </summary>
-        public int GobBlocksInZ { get; }
-
-        /// <summary>
-        /// Number of GOB blocks per tile in the X direction, for block linear textures.
-        /// </summary>
-        public int GobBlocksInTileX { get; }
-
-        /// <summary>
-        /// Total number of samples for multisampled textures.
-        /// </summary>
-        public int Samples => SamplesInX * SamplesInY;
-
-        /// <summary>
-        /// Texture target type.
-        /// </summary>
-        public Target Target { get; }
-
-        /// <summary>
-        /// Texture format information.
-        /// </summary>
-        public FormatInfo FormatInfo { get; }
-
-        /// <summary>
-        /// Depth-stencil mode of the texture. This defines whenever the depth or stencil value is read from shaders,
-        /// for depth-stencil texture formats.
-        /// </summary>
-        public DepthStencilMode DepthStencilMode { get; }
-
-        /// <summary>
-        /// Texture swizzle for the red color channel.
-        /// </summary>
-        public SwizzleComponent SwizzleR { get; }
-
-        /// <summary>
-        /// Texture swizzle for the green color channel.
-        /// </summary>
-        public SwizzleComponent SwizzleG { get; }
-
-        /// <summary>
-        /// Texture swizzle for the blue color channel.
-        /// </summary>
-        public SwizzleComponent SwizzleB { get; }
-
-        /// <summary>
-        /// Texture swizzle for the alpha color channel.
-        /// </summary>
-        public SwizzleComponent SwizzleA { get; }
-
-        /// <summary>
-        /// Constructs the texture information structure.
-        /// </summary>
-        /// <param name="address">The address of the texture</param>
-        /// <param name="width">The width of the texture</param>
-        /// <param name="height">The height or the texture</param>
-        /// <param name="depthOrLayers">The depth or layers count of the texture</param>
-        /// <param name="levels">The amount of mipmap levels of the texture</param>
-        /// <param name="samplesInX">The number of samples in the X direction for multisample textures, should be 1 otherwise</param>
-        /// <param name="samplesInY">The number of samples in the Y direction for multisample textures, should be 1 otherwise</param>
-        /// <param name="stride">The stride for linear textures</param>
-        /// <param name="isLinear">Whenever the texture is linear or block linear</param>
-        /// <param name="gobBlocksInY">Number of GOB blocks in the Y direction</param>
-        /// <param name="gobBlocksInZ">Number of GOB blocks in the Z direction</param>
-        /// <param name="gobBlocksInTileX">Number of GOB blocks per tile in the X direction</param>
-        /// <param name="target">Texture target type</param>
-        /// <param name="formatInfo">Texture format information</param>
-        /// <param name="depthStencilMode">Depth-stencil mode</param>
-        /// <param name="swizzleR">Swizzle for the red color channel</param>
-        /// <param name="swizzleG">Swizzle for the green color channel</param>
-        /// <param name="swizzleB">Swizzle for the blue color channel</param>
-        /// <param name="swizzleA">Swizzle for the alpha color channel</param>
-        public TextureInfo(
-            ulong            address,
-            int              width,
-            int              height,
-            int              depthOrLayers,
-            int              levels,
-            int              samplesInX,
-            int              samplesInY,
-            int              stride,
-            bool             isLinear,
-            int              gobBlocksInY,
-            int              gobBlocksInZ,
-            int              gobBlocksInTileX,
-            Target           target,
-            FormatInfo       formatInfo,
-            DepthStencilMode depthStencilMode = DepthStencilMode.Depth,
-            SwizzleComponent swizzleR         = SwizzleComponent.Red,
-            SwizzleComponent swizzleG         = SwizzleComponent.Green,
-            SwizzleComponent swizzleB         = SwizzleComponent.Blue,
-            SwizzleComponent swizzleA         = SwizzleComponent.Alpha)
+        /// <param name="id">ID of the texture. This is effectively a zero-based index</param>
+        /// <returns>The texture with the given ID</returns>
+        public override Texture Get(int id)
         {
-            Address          = address;
-            Width            = width;
-            Height           = height;
-            DepthOrLayers    = depthOrLayers;
-            Levels           = levels;
-            SamplesInX       = samplesInX;
-            SamplesInY       = samplesInY;
-            Stride           = stride;
-            IsLinear         = isLinear;
-            GobBlocksInY     = gobBlocksInY;
-            GobBlocksInZ     = gobBlocksInZ;
-            GobBlocksInTileX = gobBlocksInTileX;
-            Target           = target;
-            FormatInfo       = formatInfo;
-            DepthStencilMode = depthStencilMode;
-            SwizzleR         = swizzleR;
-            SwizzleG         = swizzleG;
-            SwizzleB         = swizzleB;
-            SwizzleA         = swizzleA;
-        }
-
-        /// <summary>
-        /// Gets the real texture depth.
-        /// Returns 1 for any target other than 3D textures.
-        /// </summary>
-        /// <returns>Texture depth</returns>
-        public int GetDepth()
-        {
-            return GetDepth(Target, DepthOrLayers);
-        }
-
-        /// <summary>
-        /// Gets the real texture depth.
-        /// Returns 1 for any target other than 3D textures.
-        /// </summary>
-        /// <param name="target">Texture target</param>
-        /// <param name="depthOrLayers">Texture depth if the texture is 3D, otherwise ignored</param>
-        /// <returns>Texture depth</returns>
-        public static int GetDepth(Target target, int depthOrLayers)
-        {
-            return target == Target.Texture3D ? depthOrLayers : 1;
-        }
-
-        /// <summary>
-        /// Gets the number of layers of the texture.
-        /// Returns 1 for non-array textures, 6 for cubemap textures, and layer faces for cubemap array textures.
-        /// </summary>
-        /// <returns>The number of texture layers</returns>
-        public int GetLayers()
-        {
-            return GetLayers(Target, DepthOrLayers);
-        }
-
-        /// <summary>
-        /// Gets the number of layers of the texture.
-        /// Returns 1 for non-array textures, 6 for cubemap textures, and layer faces for cubemap array textures.
-        /// </summary>
-        /// <param name="target">Texture target</param>
-        /// <param name="depthOrLayers">Texture layers if the is a array texture, ignored otherwise</param>
-        /// <returns>The number of texture layers</returns>
-        public static int GetLayers(Target target, int depthOrLayers)
-        {
-            if (target == Target.Texture2DArray || target == Target.Texture2DMultisampleArray)
+            if ((uint)id >= Items.Length)
             {
-                return depthOrLayers;
+                return null;
             }
-            else if (target == Target.CubemapArray)
+
+            if (_sequenceNumber != Context.SequenceNumber)
             {
-                return depthOrLayers * 6;
+                _sequenceNumber = Context.SequenceNumber;
+
+                SynchronizeMemory();
             }
-            else if (target == Target.Cubemap)
+
+            Texture texture = Items[id];
+
+            if (texture == null)
             {
-                return 6;
+                TextureDescriptor descriptor = GetDescriptor(id);
+
+                TextureInfo info = GetInfo(descriptor);
+
+                // Bad address. We can't add a texture with a invalid address
+                // to the cache.
+                if (info.Address == MemoryManager.PteUnmapped)
+                {
+                    return null;
+                }
+
+                texture = Context.Methods.TextureManager.FindOrCreateTexture(info, TextureSearchFlags.ForSampler);
+
+                texture.IncrementReferenceCount();
+
+                Items[id] = texture;
             }
             else
             {
-                return 1;
+                if (texture.ChangedSize)
+                {
+                    // Texture changed size at one point - it may be a different size than the sampler expects.
+                    // This can be triggered when the size is changed by a size hint on copy or draw, but the texture has been sampled before.
+
+                    TextureDescriptor descriptor = GetDescriptor(id);
+
+                    int width = descriptor.UnpackWidth();
+                    int height = descriptor.UnpackHeight();
+
+                    if (texture.Info.Width != width || texture.Info.Height != height)
+                    {
+                        texture.ChangeSize(width, height, texture.Info.DepthOrLayers);
+                    }
+                }
+
+                // Memory is automatically synchronized on texture creation.
+                texture.SynchronizeMemory();
+            }
+
+            return texture;
+        }
+
+        /// <summary>
+        /// Gets the texture descriptor from a given texture ID.
+        /// </summary>
+        /// <param name="id">ID of the texture. This is effectively a zero-based index</param>
+        /// <returns>The texture descriptor</returns>
+        public TextureDescriptor GetDescriptor(int id)
+        {
+            return Context.PhysicalMemory.Read<TextureDescriptor>(Address + (ulong)id * DescriptorSize);
+        }
+
+        /// <summary>
+        /// Implementation of the texture pool range invalidation.
+        /// </summary>
+        /// <param name="address">Start address of the range of the texture pool</param>
+        /// <param name="size">Size of the range being invalidated</param>
+        protected override void InvalidateRangeImpl(ulong address, ulong size)
+        {
+            ulong endAddress = address + size;
+
+            for (; address < endAddress; address += DescriptorSize)
+            {
+                int id = (int)((address - Address) / DescriptorSize);
+
+                Texture texture = Items[id];
+
+                if (texture != null)
+                {
+                    TextureDescriptor descriptor = Context.PhysicalMemory.Read<TextureDescriptor>(address);
+
+                    // If the descriptors are the same, the texture is the same,
+                    // we don't need to remove as it was not modified. Just continue.
+                    if (texture.IsExactMatch(GetInfo(descriptor), TextureSearchFlags.Strict) != TextureMatchQuality.NoMatch)
+                    {
+                        continue;
+                    }
+
+                    texture.DecrementReferenceCount();
+
+                    Items[id] = null;
+                }
             }
         }
 
         /// <summary>
-        /// Calculates the size information from the texture information.
+        /// Gets texture information from a texture descriptor.
         /// </summary>
-        /// <param name="layerSize">Optional size of each texture layer in bytes</param>
-        /// <returns>Texture size information</returns>
-        public SizeInfo CalculateSizeInfo(int layerSize = 0)
+        /// <param name="descriptor">The texture descriptor</param>
+        /// <returns>The texture information</returns>
+        private TextureInfo GetInfo(TextureDescriptor descriptor)
         {
-            if (Target == Target.TextureBuffer)
+            ulong gpuVa = descriptor.UnpackAddress();
+            ulong address = Context.MemoryManager.Translate(gpuVa);
+
+            int width         = descriptor.UnpackWidth();
+            int height        = descriptor.UnpackHeight();
+            int depthOrLayers = descriptor.UnpackDepth();
+            int levels        = descriptor.UnpackLevels();
+
+            TextureMsaaMode msaaMode = descriptor.UnpackTextureMsaaMode();
+
+            int samplesInX = msaaMode.SamplesInX();
+            int samplesInY = msaaMode.SamplesInY();
+
+            int stride = descriptor.UnpackStride();
+
+            TextureDescriptorType descriptorType = descriptor.UnpackTextureDescriptorType();
+
+            bool isLinear = descriptorType == TextureDescriptorType.Linear;
+
+            Target target = descriptor.UnpackTextureTarget().Convert((samplesInX | samplesInY) != 1);
+
+            // We use 2D targets for 1D textures as that makes texture cache
+            // management easier. We don't know the target for render target
+            // and copies, so those would normally use 2D targets, which are
+            // not compatible with 1D targets. By doing that we also allow those
+            // to match when looking for compatible textures on the cache.
+            if (target == Target.Texture1D)
             {
-                return new SizeInfo(Width * FormatInfo.BytesPerPixel);
+                target = Target.Texture2D;
+                height = 1;
             }
-            else if (IsLinear)
+            else if (target == Target.Texture1DArray)
             {
-                return SizeCalculator.GetLinearTextureSize(
-                    Stride,
-                    Height,
-                    FormatInfo.BlockHeight);
+                target = Target.Texture2DArray;
+                height = 1;
+            }
+
+            uint format = descriptor.UnpackFormat();
+            bool srgb   = descriptor.UnpackSrgb();
+
+            if (!FormatTable.TryGetTextureFormat(format, srgb, out FormatInfo formatInfo))
+            {
+                if ((long)address > 0L && (int)format > 0)
+                {
+                    Logger.Error?.Print(LogClass.Gpu, $"Invalid texture format 0x{format:X} (sRGB: {srgb}).");
+                }
+
+                formatInfo = FormatInfo.Default;
+            }
+
+            int gobBlocksInY = descriptor.UnpackGobBlocksInY();
+            int gobBlocksInZ = descriptor.UnpackGobBlocksInZ();
+
+            int gobBlocksInTileX = descriptor.UnpackGobBlocksInTileX();
+
+            SwizzleComponent swizzleR = descriptor.UnpackSwizzleR().Convert();
+            SwizzleComponent swizzleG = descriptor.UnpackSwizzleG().Convert();
+            SwizzleComponent swizzleB = descriptor.UnpackSwizzleB().Convert();
+            SwizzleComponent swizzleA = descriptor.UnpackSwizzleA().Convert();
+
+            DepthStencilMode depthStencilMode = GetDepthStencilMode(
+                formatInfo.Format,
+                swizzleR,
+                swizzleG,
+                swizzleB,
+                swizzleA);
+
+            if (formatInfo.Format.IsDepthOrStencil())
+            {
+                swizzleR = SwizzleComponent.Red;
+                swizzleG = SwizzleComponent.Red;
+                swizzleB = SwizzleComponent.Red;
+
+                if (depthStencilMode == DepthStencilMode.Depth)
+                {
+                    swizzleA = SwizzleComponent.One;
+                }
+                else
+                {
+                    swizzleA = SwizzleComponent.Red;
+                }
+            }
+
+            return new TextureInfo(
+                address,
+                gpuVa,
+                width,
+                height,
+                depthOrLayers,
+                levels,
+                samplesInX,
+                samplesInY,
+                stride,
+                isLinear,
+                gobBlocksInY,
+                gobBlocksInZ,
+                gobBlocksInTileX,
+                target,
+                formatInfo,
+                depthStencilMode,
+                swizzleR,
+                swizzleG,
+                swizzleB,
+                swizzleA);
+        }
+
+        /// <summary>
+        /// Gets the texture depth-stencil mode, based on the swizzle components of each color channel.
+        /// The depth-stencil mode is determined based on how the driver sets those parameters.
+        /// </summary>
+        /// <param name="format">The format of the texture</param>
+        /// <param name="components">The texture swizzle components</param>
+        /// <returns>The depth-stencil mode</returns>
+        private static DepthStencilMode GetDepthStencilMode(Format format, params SwizzleComponent[] components)
+        {
+            // R = Depth, G = Stencil.
+            // On 24-bits depth formats, this is inverted (Stencil is R etc).
+            // NVN setup:
+            // For depth, A is set to 1.0f, the other components are set to Depth.
+            // For stencil, all components are set to Stencil.
+            SwizzleComponent component = components[0];
+
+            for (int index = 1; index < 4 && !IsRG(component); index++)
+            {
+                component = components[index];
+            }
+
+            if (!IsRG(component))
+            {
+                return DepthStencilMode.Depth;
+            }
+
+            if (format == Format.D24X8Unorm || format == Format.D24UnormS8Uint)
+            {
+                return component == SwizzleComponent.Red
+                    ? DepthStencilMode.Stencil
+                    : DepthStencilMode.Depth;
             }
             else
             {
-                return SizeCalculator.GetBlockLinearTextureSize(
-                    Width,
-                    Height,
-                    GetDepth(),
-                    Levels,
-                    GetLayers(),
-                    FormatInfo.BlockWidth,
-                    FormatInfo.BlockHeight,
-                    FormatInfo.BytesPerPixel,
-                    GobBlocksInY,
-                    GobBlocksInZ,
-                    GobBlocksInTileX,
-                    layerSize);
+                return component == SwizzleComponent.Red
+                    ? DepthStencilMode.Depth
+                    : DepthStencilMode.Stencil;
             }
+        }
+
+        /// <summary>
+        /// Checks if the swizzle component is equal to the red or green channels.
+        /// </summary>
+        /// <param name="component">The swizzle component to check</param>
+        /// <returns>True if the swizzle component is equal to the red or green, false otherwise</returns>
+        private static bool IsRG(SwizzleComponent component)
+        {
+            return component == SwizzleComponent.Red ||
+                   component == SwizzleComponent.Green;
+        }
+
+        /// <summary>
+        /// Decrements the reference count of the texture.
+        /// This indicates that the texture pool is not using it anymore.
+        /// </summary>
+        /// <param name="item">The texture to be deleted</param>
+        protected override void Delete(Texture item)
+        {
+            item?.DecrementReferenceCount();
         }
     }
 }
